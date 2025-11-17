@@ -1,0 +1,15 @@
+{
+  "user_id": "skyblue5023",
+  "user_pw": "ekdmsmx9caj",
+  "preferred_time": "19:00",
+  "preferred_seat": null,
+  "branch": "중계점",
+  "max_retries": 3,
+  "retry_delay": 2,
+  "advance_seconds": 10,
+  "wait_for_time": true,
+  "headless": false,
+  "enable_notification": true,
+  "notification_type": "kakao",
+  "kakao_rest_api_key": "YOUR_KAKAO_REST_API_KEY"
+}
