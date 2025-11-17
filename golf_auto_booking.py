@@ -1942,28 +1942,20 @@ class GolfBookingBot:
                 seen_times = set()
                 for elem in all_time_elements:
                     try:
-                        # disabled 속성 및 unselectable 클래스 확인
+                        # disabled 속성 확인
                         is_disabled = elem.get_attribute('disabled')
-                        class_attr = elem.get_attribute('class') or ''
-                        has_unselectable = 'unselectable' in class_attr
                         is_visible = elem.is_displayed()
                         text = elem.text.strip()
                         
-                        logger.info(f"    시간 버튼: '{text}' / disabled={is_disabled} / unselectable={has_unselectable} / visible={is_visible}")
+                        logger.info(f"    시간 버튼: '{text}' / disabled={is_disabled} / visible={is_visible}")
                         
-                        # 예약 가능 조건: disabled가 없고, unselectable 클래스가 없고, 보이는 상태, 시간 형식, 중복 아님
-                        if not is_disabled and not has_unselectable and is_visible and ':' in text and text not in seen_times:
+                        # disabled가 아니고, 보이고, 시간 형식이고, 중복 아니면 추가
+                        if not is_disabled and is_visible and ':' in text and text not in seen_times:
                             seen_times.add(text)
                             time_slots.append((text, elem))
                             logger.info(f"      ✅ 예약 가능 시간: '{text}'")
-                        else:
-                            reason = []
-                            if is_disabled:
-                                reason.append("disabled")
-                            if has_unselectable:
-                                reason.append("unselectable")
-                            if reason:
-                                logger.info(f"      ⚠️  예약 불가 시간: '{text}' ({', '.join(reason)})")
+                        elif is_disabled:
+                            logger.info(f"      ⚠️  예약 불가 시간: '{text}' (disabled)")
                             
                     except Exception as e:
                         logger.debug(f"    시간 요소 처리 실패: {str(e)}")
