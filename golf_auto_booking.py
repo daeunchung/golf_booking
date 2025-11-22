@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import platform
+from kakao_notification import KakaoNotifier
 
 # 로깅 설정
 logging.basicConfig(
@@ -40,6 +41,19 @@ class GolfBookingBot:
         self.config = config
         self.driver = None
         self.wait = None
+        self.kakao_notifier = None
+
+        # 카카오톡 알림 초기화
+        if config.get('enable_notification') and config.get('notification_type') == 'kakao':
+            try:
+                api_key = config.get('kakao_rest_api_key')
+                if api_key and api_key != 'YOUR_KAKAO_REST_API_KEY':
+                    self.kakao_notifier = KakaoNotifier(api_key)
+                    logger.info("✅ 카카오톡 알림 활성화")
+                else:
+                    logger.warning("⚠️  카카오 API 키가 설정되지 않음")
+            except Exception as e:
+                logger.warning(f"⚠️  카카오톡 알림 초기화 실패: {str(e)}")
         
     def setup_driver(self):
         """Chrome 드라이버 설정"""
@@ -119,14 +133,111 @@ class GolfBookingBot:
             logger.info("✅ 쿠키 저장 완료")
         except Exception as e:
             logger.warning(f"⚠️  쿠키 저장 실패: {str(e)}")
-    
+
+    def send_booking_notification(self, booth_text, date, day_name, time_slot):
+        """
+        예약 완료 카카오톡 알림 전송
+
+        Args:
+            booth_text: 타석 이름
+            date: 날짜 (예: 2025-11-24)
+            day_name: 요일 (예: 모레)
+            time_slot: 시간 (예: 6:00)
+        """
+        if not self.kakao_notifier:
+            logger.info("ℹ️  카카오톡 알림이 비활성화되어 있습니다")
+            return
+
+        try:
+            # 메시지 포맷
+            message = f"""🎉 골프 예약 완료!
+━━━━━━━━━━━━━━━━━━━━━━
+📍 타석: {booth_text}
+📅 날짜: {date} ({day_name})
+⏰ 시간: {time_slot}
+━━━━━━━━━━━━━━━━━━━━━━
+✅ 메이저골프아카데미 중계점"""
+
+            # 예약 내역 페이지 링크
+            booking_url = "https://booking.naver.com/my/bookings"
+
+            # 메시지 전송
+            success = self.kakao_notifier.send_message(
+                text=message,
+                link_url=booking_url,
+                link_title="예약 내역 확인"
+            )
+
+            if success:
+                logger.info("✅ 카카오톡 알림 전송 완료")
+            else:
+                logger.warning("⚠️  카카오톡 알림 전송 실패")
+
+        except Exception as e:
+            logger.error(f"❌ 카카오톡 알림 전송 오류: {str(e)}")
+
     def naver_login(self):
-        """네이버 로그인 - 무조건 수동 로그인 (ID 1초, PW 2초)"""
+        """네이버 로그인 - 쿠키 우선, 실패시 수동 로그인"""
         try:
             logger.info("=" * 60)
-            logger.info("🔐 네이버 로그인 시작 (수동 입력)")
+            logger.info("🔐 네이버 로그인 시작")
             logger.info("=" * 60)
-            
+
+            # 1단계: 쿠키로 로그인 시도
+            logger.info("🍪 저장된 쿠키로 로그인 시도 중...")
+            self.driver.get("https://naver.com")
+            time.sleep(2)
+
+            # 쿠키 로드 시도
+            import pickle
+            import os
+            if os.path.exists('naver_cookies.pkl'):
+                try:
+                    with open('naver_cookies.pkl', 'rb') as f:
+                        cookies = pickle.load(f)
+
+                    for cookie in cookies:
+                        try:
+                            self.driver.add_cookie(cookie)
+                        except:
+                            pass
+
+                    logger.info("✅ 쿠키 로드 완료")
+
+                    # 쿠키 적용 확인을 위해 새로고침
+                    self.driver.refresh()
+                    time.sleep(2)
+
+                    # 로그인 상태 확인
+                    if self._check_login_status():
+                        logger.info("✅ 쿠키 로그인 성공! (캡챠 회피)")
+
+                        # 바로 메이저골프아카데미 중계점으로 이동
+                        logger.info("🏌️ 메이저골프아카데미 중계점으로 이동 중...")
+                        self.driver.get("https://booking.naver.com/booking/13/bizes/1063794")
+
+                        # 페이지 로드 대기
+                        try:
+                            WebDriverWait(self.driver, 5).until(
+                                EC.presence_of_element_located((By.TAG_NAME, "body"))
+                            )
+                            logger.info("✅ 메이저골프아카데미 중계점 페이지 로드 완료")
+                        except:
+                            time.sleep(1)
+
+                        return True
+                    else:
+                        logger.warning("⚠️  쿠키 로그인 실패 - 수동 로그인 진행")
+                except Exception as e:
+                    logger.warning(f"⚠️  쿠키 로드 실패: {str(e)}")
+            else:
+                logger.info("ℹ️  저장된 쿠키 없음 - 수동 로그인 진행")
+
+            # 2단계: 수동 로그인
+            logger.info("=" * 60)
+            logger.info("🔐 수동 로그인 시작 (매우 느리게)")
+            logger.info("=" * 60)
+
             logger.info("네이버 로그인 페이지 접속...")
             self.driver.get("https://nid.naver.com/nidlogin.login")
             time.sleep(3)
@@ -558,79 +669,15 @@ class GolfBookingBot:
                     logger.error(traceback.format_exc())
                     return False
             
-            # "동의하고 예약하기" 버튼
-            try:
-                time.sleep(1)
-                logger.info("🔍 '동의하고 예약하기' 버튼 찾는 중...")
-                
-                agree_button_selectors = [
-                    "//button[@data-click-code='submitbutton.submit']",
-                    "//button[contains(@class, 'btn_request')]",
-                    "//button[contains(text(), '동의하고 예약하기')]",
-                ]
-                
-                agree_clicked = False
-                for selector in agree_button_selectors:
-                    try:
-                        agree_btn = self.driver.find_element(By.XPATH, selector)
-                        if agree_btn.is_displayed() and agree_btn.is_enabled():
-                            agree_btn.click()
-                            logger.info("✅ '동의하고 예약하기' 버튼 클릭")
-                            time.sleep(3)
-                            agree_clicked = True
-                            break
-                    except:
-                        continue
-                
-                if not agree_clicked:
-                    logger.error("❌ '동의하고 예약하기' 버튼을 찾지 못함")
-                    return False
-                    
-            except Exception as e:
-                logger.error(f"❌ '동의하고 예약하기' 버튼 처리 실패: {str(e)}")
+            # "동의하고 예약하기" 버튼 (공통 함수 사용)
+            if not self._click_agree_and_book():
                 return False
-            
-            # 예약 확정 확인
-            try:
-                time.sleep(2)
-                logger.info("🔍 예약 확정 여부 확인 중...")
-                
-                confirmation_selectors = [
-                    "//strong[contains(@class, 'popup_tit')][contains(text(), '예약이 확정')]",
-                    "//*[contains(text(), '예약이 확정되었습니다')]",
-                    "//strong[contains(text(), '예약이 확정')]",
-                ]
-                
-                confirmed = False
-                for selector in confirmation_selectors:
-                    try:
-                        confirm_elem = self.driver.find_element(By.XPATH, selector)
-                        if confirm_elem.is_displayed():
-                            confirm_text = confirm_elem.text
-                            logger.info(f"✅ 확인: '{confirm_text}'")
-                            confirmed = True
-                            break
-                    except:
-                        continue
-                
-                if not confirmed:
-                    try:
-                        page_source = self.driver.page_source
-                        if '예약이 확정' in page_source or '확정되었습니다' in page_source:
-                            logger.info("✅ 페이지에서 '예약 확정' 메시지 발견")
-                            confirmed = True
-                    except:
-                        pass
-                
-                if not confirmed:
-                    logger.error("❌ 예약 실패: '예약이 확정되었습니다' 메시지를 찾을 수 없음")
-                    return False
-                
-                return True
-                
-            except Exception as e:
-                logger.error(f"❌ 예약 확정 확인 실패: {str(e)}")
+
+            # 예약 확정 확인 (공통 함수 사용)
+            if not self._confirm_booking():
                 return False
+
+            return True
                 
         except Exception as e:
             logger.error(f"❌ 예약 단계 처리 실패: {str(e)}")
@@ -651,8 +698,15 @@ class GolfBookingBot:
             # 타겟 도메인으로 먼저 이동
             logger.info(f"🔗 {target_url[:60]}... 로 이동 중...")
             self.driver.get(target_url)
-            time.sleep(2)
-            
+
+            # 페이지 로드 대기 (body 요소 확인)
+            try:
+                WebDriverWait(self.driver, 3).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+            except:
+                time.sleep(0.5)
+
             # 쿠키 적용
             applied = 0
             for cookie in cookies:
@@ -665,13 +719,20 @@ class GolfBookingBot:
                             applied += 1
                 except Exception as e:
                     logger.debug(f"쿠키 적용 실패: {cookie.get('name', 'unknown')} - {str(e)}")
-            
+
             if applied > 0:
                 logger.info(f"✅ {applied}개 쿠키 적용 완료")
-                
+
                 # 페이지 새로고침으로 쿠키 적용
                 self.driver.refresh()
-                time.sleep(2)
+
+                # 새로고침 후 페이지 로드 대기
+                try:
+                    WebDriverWait(self.driver, 3).until(
+                        EC.presence_of_element_located((By.TAG_NAME, "body"))
+                    )
+                except:
+                    time.sleep(0.5)
                 
                 # 로그인 상태 확인
                 if self._check_login_status():
@@ -698,21 +759,248 @@ class GolfBookingBot:
                     return False
             except:
                 pass
-            
+
             # 페이지 소스에서 확인
             page_source = self.driver.page_source
-            
+
             # 로그인 관련 요소가 있으면 로그아웃 상태
             if '로그인이 필요' in page_source or '로그인하세요' in page_source:
                 return False
-            
+
             # 기본적으로 로그인 상태로 가정
             return True
-            
+
         except:
             # 확인 불가시 로그인 상태로 가정
             return True
-    
+
+    # ==================== 공통 예약 함수들 ====================
+
+    def _select_date(self, target_day):
+        """
+        날짜 선택 공통 함수
+
+        Args:
+            target_day: 선택할 날짜 (일)
+
+        Returns:
+            bool: 성공 여부
+        """
+        try:
+            date_selectors = [
+                f"//button[text()='{target_day}']",
+                f"//button[contains(text(), '{target_day}')]",
+                f"//*[contains(@class, 'date')]//*[text()='{target_day}']",
+            ]
+
+            for selector in date_selectors:
+                try:
+                    date_btn = WebDriverWait(self.driver, 3).until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
+                    )
+                    date_btn.click()
+                    logger.info(f"✅ 날짜 {target_day}일 선택")
+                    time.sleep(0.5)
+                    return True
+                except:
+                    continue
+
+            logger.warning(f"⚠️  날짜 {target_day}일 선택 실패")
+            return False
+
+        except Exception as e:
+            logger.error(f"❌ 날짜 선택 오류: {str(e)}")
+            return False
+
+    def _select_time(self, time_text):
+        """
+        시간 선택 공통 함수
+
+        Args:
+            time_text: 선택할 시간 (예: "19:00")
+
+        Returns:
+            bool: 성공 여부
+        """
+        try:
+            time_selectors = [
+                f"//button[contains(text(), '{time_text}')]",
+                f"//span[contains(text(), '{time_text}')]/ancestor::button",
+                f"//*[contains(@class, 'time')]//*[contains(text(), '{time_text}')]/ancestor::button",
+            ]
+
+            for selector in time_selectors:
+                try:
+                    time_btn = WebDriverWait(self.driver, 3).until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
+                    )
+                    time_btn.click()
+                    logger.info(f"✅ 시간 {time_text} 선택")
+                    time.sleep(0.5)
+                    return True
+                except:
+                    continue
+
+            logger.warning(f"⚠️  시간 {time_text} 선택 실패")
+            return False
+
+        except Exception as e:
+            logger.error(f"❌ 시간 선택 오류: {str(e)}")
+            return False
+
+    def _click_next_button(self):
+        """
+        '다음' 버튼 클릭 공통 함수
+
+        Returns:
+            bool: 성공 여부
+        """
+        try:
+            logger.info("🔍 '다음' 버튼 확인 중...")
+
+            # disabled가 아닌 버튼만 찾기
+            next_btn = WebDriverWait(self.driver, 5).until(
+                EC.element_to_be_clickable((
+                    By.XPATH,
+                    "//button[@data-click-code='nextbuttonview.request'][not(contains(@class, 'disabled'))]"
+                ))
+            )
+
+            next_btn.click()
+            logger.info("✅ '다음' 버튼 클릭")
+            time.sleep(0.5)
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ '다음' 버튼 클릭 실패: {str(e)}")
+            return False
+
+    def _click_agree_and_book(self):
+        """
+        '동의하고 예약하기' 버튼 클릭 공통 함수
+
+        Returns:
+            bool: 성공 여부
+        """
+        try:
+            time.sleep(1)
+            logger.info("🔍 '동의하고 예약하기' 버튼 찾는 중...")
+
+            agree_button_selectors = [
+                "//button[@data-click-code='submitbutton.submit']",
+                "//button[contains(@class, 'btn_request')]",
+                "//button[contains(text(), '동의하고 예약하기')]",
+            ]
+
+            for selector in agree_button_selectors:
+                try:
+                    agree_btn = WebDriverWait(self.driver, 5).until(
+                        EC.element_to_be_clickable((By.XPATH, selector))
+                    )
+
+                    # 버튼이 화면에 보이도록 스크롤
+                    self.driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", agree_btn)
+                    time.sleep(0.5)
+
+                    # JavaScript로 클릭
+                    self.driver.execute_script("arguments[0].click();", agree_btn)
+                    logger.info("✅ '동의하고 예약하기' 버튼 클릭 (JavaScript)")
+                    time.sleep(2)
+                    return True
+                except:
+                    continue
+
+            logger.error("❌ '동의하고 예약하기' 버튼을 찾지 못함")
+            return False
+
+        except Exception as e:
+            logger.error(f"❌ '동의하고 예약하기' 버튼 처리 실패: {str(e)}")
+            return False
+
+    def _confirm_booking(self):
+        """
+        예약 완료 확인 공통 함수 (URL 패턴으로)
+
+        Returns:
+            bool: 성공 여부
+        """
+        try:
+            logger.info("🔍 예약 완료 여부 확인 중...")
+
+            # 1단계: URL 변경 확인 (가장 확실한 방법)
+            confirmed = False
+            for _ in range(10):  # 최대 5초 대기
+                current_url = self.driver.current_url
+                if "/my/bookings/" in current_url and "popup=bookingCompletion" in current_url:
+                    logger.info(f"✅ 예약 완료 URL 확인: {current_url}")
+                    confirmed = True
+                    break
+                time.sleep(0.5)
+
+            # 2단계: URL 확인 실패 시 텍스트로 확인 (fallback)
+            if not confirmed:
+                confirmation_selectors = [
+                    "//strong[contains(@class, 'popup_tit')][contains(text(), '예약이 확정')]",
+                    "//*[contains(text(), '예약이 확정되었습니다')]",
+                    "//strong[contains(text(), '예약이 확정')]",
+                ]
+
+                for selector in confirmation_selectors:
+                    try:
+                        confirm_elem = self.driver.find_element(By.XPATH, selector)
+                        if confirm_elem.is_displayed():
+                            confirm_text = confirm_elem.text
+                            logger.info(f"✅ 확인: '{confirm_text}'")
+                            confirmed = True
+                            break
+                    except:
+                        continue
+
+                if not confirmed:
+                    try:
+                        page_source = self.driver.page_source
+                        if '예약이 확정' in page_source or '확정되었습니다' in page_source:
+                            logger.info("✅ 페이지에서 '예약 확정' 메시지 발견")
+                            confirmed = True
+                    except:
+                        pass
+
+            if not confirmed:
+                logger.error("❌ 예약 실패: 예약 완료를 확인할 수 없음")
+                logger.info(f"현재 URL: {self.driver.current_url}")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ 예약 확정 확인 실패: {str(e)}")
+            return False
+
+    def _complete_booking(self, found_slot):
+        """
+        예약 완료 처리 공통 함수 (로그 출력 + 카카오톡 알림)
+
+        Args:
+            found_slot: 예약 정보 딕셔너리
+        """
+        logger.info("\n" + "=" * 60)
+        logger.info("🎉 예약 완료!")
+        logger.info("=" * 60)
+        logger.info(f"📍 타석: {found_slot['booth_text']}")
+        logger.info(f"📅 날짜: {found_slot['date']} ({found_slot['day_name']})")
+        logger.info(f"⏰ 시간: {found_slot['time']}")
+        logger.info("=" * 60)
+
+        # 카카오톡 알림 전송
+        self.send_booking_notification(
+            booth_text=found_slot['booth_text'],
+            date=found_slot['date'],
+            day_name=found_slot['day_name'],
+            time_slot=found_slot['time']
+        )
+
+    # ==================== Mode 함수들 ====================
+
     def book_earliest_slot(self):
         """0번 모드: 여러 타석을 순회하며 가장 빠른 예약 가능 타석 찾기"""
         try:
@@ -721,50 +1009,50 @@ class GolfBookingBot:
                 "%EA%B3%A8%ED%94%84%EC%95%84%EC%B9%B4%EB%8D%B0%EB%AF%B8/"
                 "place/1076834793?placePath=/ticket"
             )
-            
+
             logger.info(f"🔗 예약 페이지 접속...")
             self.driver.get(booking_url)
-            time.sleep(3)
-            
+
             try:
                 self.wait.until(EC.frame_to_be_available_and_switch_to_it("entryIframe"))
                 logger.info("✅ iframe 전환 완료")
-                time.sleep(2)
             except TimeoutException:
                 logger.error("❌ iframe을 찾을 수 없음")
                 return False, {}
-            
+
             try:
                 booking_tab = self.wait.until(
                     EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '예약')]"))
                 )
                 booking_tab.click()
-                time.sleep(2)
                 logger.info("✅ 예약 탭 클릭")
             except:
                 logger.info("ℹ️  예약 탭이 이미 선택됨")
-            
+
             logger.info("=" * 60)
             logger.info("🔍 타석 링크 검색 및 순회")
             logger.info("=" * 60)
             
-            time.sleep(2)
-            
             # 타석 예약 링크 찾기
             try:
+                # 타석 링크가 로드될 때까지 대기
+                self.wait.until(
+                    EC.presence_of_element_located((By.XPATH, "//a[contains(@href, 'booking.naver.com')]"))
+                )
+
                 # "번타석예약" 텍스트를 가진 링크들 찾기
                 booth_links = self.driver.find_elements(
                     By.XPATH,
                     "//a[contains(@href, 'booking.naver.com')][contains(., '번타석')]"
                 )
-                
+
                 if not booth_links:
                     # 다른 패턴 시도
                     booth_links = self.driver.find_elements(
                         By.XPATH,
                         "//a[contains(., '번타석예약')]"
                     )
-                
+
                 logger.info(f"발견된 타석 링크: {len(booth_links)}개")
                 
                 # 링크 정보 추출
@@ -807,27 +1095,22 @@ class GolfBookingBot:
                 logger.info(f"{'=' * 60}")
                 
                 try:
-                    # 타석 링크로 이동
+                    # 타석 링크로 이동 (쿠키 적용 건너뛰고 세션 유지)
                     logger.info(f"🔗 {booth_info['text']} 페이지로 이동...")
-                    
-                    # 쿠키를 유지하며 예약 페이지로 이동
-                    cookie_success = self.apply_cookies_to_domain(booth_info['href'])
-                    
-                    # 쿠키 로그인 실패 시 현재 세션 유지
-                    if not cookie_success:
-                        logger.warning("⚠️  쿠키 로그인 실패 - 현재 세션 상태로 진행")
-                        # 이미 메인에서 로그인했으므로 세션은 유지됨
-                        self.driver.get(booth_info['href'])
-                        time.sleep(2)
-                    
+                    self.driver.get(booth_info['href'])
+
+                    # 페이지 로드 완료 대기 (body 요소가 나타날 때까지)
+                    try:
+                        self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                    except:
+                        pass
+
                     # 로그인 페이지로 리다이렉트 되었는지 확인
                     current_url = self.driver.current_url
                     if 'nid.naver.com/nidlogin' in current_url or 'login' in current_url.lower():
                         logger.error("❌ 로그인 페이지로 리다이렉트됨 - 로그인 필요")
                         logger.error("프로그램을 재시작하고 다시 로그인해주세요")
                         return False, {'error': '로그인 필요'}
-                    
-                    time.sleep(1)
                     
                     # 3일간 확인
                     for day_offset in range(3):
@@ -836,9 +1119,11 @@ class GolfBookingBot:
                         
                         target_date = today + timedelta(days=day_offset)
                         target_day = target_date.day
-                        day_name = ["오늘", "내일", "모레"][day_offset]
-                        
-                        logger.info(f"\n  📅 {day_name} ({target_date.strftime('%Y-%m-%d')})")
+                        day_label = ["오늘", "내일", "모레"][day_offset]
+                        weekday_name = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일'][target_date.weekday()]
+                        day_name = f"{weekday_name}, {day_label}"
+
+                        logger.info(f"\n  📅 {day_label} ({target_date.strftime('%Y-%m-%d')} {weekday_name})")
                         
                         # 날짜 선택
                         if day_offset > 0:
@@ -860,9 +1145,15 @@ class GolfBookingBot:
                                                     elem_text = elem.text.strip()
                                                     if elem_text == str(target_day):
                                                         elem.click()
-                                                        time.sleep(2)
                                                         date_selected = True
                                                         logger.info(f"    ✅ {target_day}일 선택")
+                                                        # 날짜 변경 후 시간대 버튼이 로드될 때까지 대기
+                                                        try:
+                                                            WebDriverWait(self.driver, 3).until(
+                                                                EC.presence_of_element_located((By.XPATH, "//button[contains(@class, 'btn_time')]"))
+                                                            )
+                                                        except:
+                                                            time.sleep(0.5)  # 최소 대기
                                                         break
                                             except:
                                                 continue
@@ -877,10 +1168,13 @@ class GolfBookingBot:
                             except Exception as e:
                                 logger.debug(f"    날짜 선택 오류: {str(e)}")
                         
-                        # 시간대 확인
-                        time.sleep(1.5)
-                        
+                        # 시간대 확인 (시간 버튼이 로드될 때까지 대기)
                         try:
+                            # 시간 버튼이 로드될 때까지 대기
+                            self.wait.until(
+                                EC.presence_of_element_located((By.XPATH, "//button[contains(@class, 'btn_time')]"))
+                            )
+
                             # btn_time 클래스 버튼들 찾기
                             time_buttons = self.driver.find_elements(
                                 By.XPATH,
@@ -943,22 +1237,24 @@ class GolfBookingBot:
                                 
                         except Exception as e:
                             logger.warning(f"    시간대 확인 실패: {str(e)}")
+                            import traceback
+                            logger.debug(traceback.format_exc())
                     
                     # 다음 타석 확인을 위해 메인 페이지로 돌아가기
                     if not found_slot and booth_idx < len(booth_infos) - 1:
                         logger.info(f"\n  ⬅️  메인 페이지로 복귀...")
                         self.driver.get(booking_url)
-                        time.sleep(2)
-                        
+
                         # iframe 다시 전환
                         try:
                             self.wait.until(EC.frame_to_be_available_and_switch_to_it("entryIframe"))
-                            
+
                             # 예약 탭 클릭
                             try:
-                                booking_tab = self.driver.find_element(By.XPATH, "//a[contains(text(), '예약')]")
+                                booking_tab = self.wait.until(
+                                    EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '예약')]"))
+                                )
                                 booking_tab.click()
-                                time.sleep(1)
                             except:
                                 pass
                         except:
@@ -980,234 +1276,168 @@ class GolfBookingBot:
             try:
                 found_slot['time_btn'].click()
                 logger.info(f"✅ {found_slot['time']} 선택")
-                time.sleep(2)
             except Exception as e:
                 logger.error(f"❌ 시간 선택 실패: {str(e)}")
                 return False, found_slot
-            
-            # "다음" 버튼 클릭
+
+            # "다음" 버튼 클릭 (공통 함수 사용)
+            if not self._click_next_button():
+                logger.error("❌ '다음' 버튼을 클릭하지 못해 예약을 진행할 수 없습니다")
+                return False, found_slot
+
+            # 페이지 전환 대기 (URL 변경 또는 특정 요소 로드)
             try:
-                logger.info("🔍 '다음' 버튼 찾는 중...")
-                
-                next_button_selectors = [
-                    "//button[contains(@class, 'NextButton__btn_next')]",
-                    "//button[contains(text(), '다음')]",
-                    "//button[@data-click-code='nextbuttonview.request']",
-                ]
-                
-                next_clicked = False
-                for selector in next_button_selectors:
+                WebDriverWait(self.driver, 3).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
+            except:
+                time.sleep(0.5)
+
+            current_url = self.driver.current_url
+
+            if 'nid.naver.com' in current_url or 'login' in current_url.lower():
+                logger.info("=" * 60)
+                logger.info("🔐 예약 페이지에서 로그인 요청됨")
+                logger.info("=" * 60)
+
+                # ID/PW 입력 폼 확인
+                try:
+                    id_input = self.wait.until(
+                        EC.presence_of_element_located((By.ID, "id"))
+                    )
+                    pw_input = self.driver.find_element(By.ID, "pw")
+                    logger.info("✅ 로그인 폼 확인")
+
+                    # 사람처럼 천천히, 불규칙하게 입력
+                    import random
+                    logger.info("로그인 정보 입력 중...")
+
+                    # 입력 필드 클릭 전 잠깐 대기
+                    time.sleep(random.uniform(0.8, 1.2))
+
+                    id_input.clear()
+                    time.sleep(random.uniform(0.5, 0.8))
+
+                    user_id = self.config['user_id']
+                    # ID: 글자당 0.3~0.6초 (더 느리게 - 캡챠 방지 강화)
+                    logger.info(f"📝 ID 입력 중... (약 {len(user_id) * 0.45:.1f}초 소요)")
+                    for char in user_id:
+                        id_input.send_keys(char)
+                        time.sleep(random.uniform(0.3, 0.6))
+
+                    # ID 입력 후 PW로 이동하기 전 생각
+                    time.sleep(random.uniform(1.5, 2.5))
+
+                    pw_input.clear()
+                    time.sleep(random.uniform(0.5, 0.8))
+
+                    user_pw = self.config['user_pw']
+                    # PW: 글자당 0.4~0.8초 (매우 느리게 - 캡챠 방지)
+                    logger.info(f"🔒 PW 입력 중... (약 {len(user_pw) * 0.6:.1f}초 소요)")
+                    for char in user_pw:
+                        pw_input.send_keys(char)
+                        time.sleep(random.uniform(0.4, 0.8))
+
+                    # PW 입력 후 확인하는 시간 (3~5초) - 사람이 입력 내용을 확인하고 고민
+                    thinking_time = random.uniform(3.0, 5.0)
+                    logger.info(f"💭 입력 내용 확인 중... ({thinking_time:.1f}초)")
+                    time.sleep(thinking_time)
+
+                    logger.info("✅ 로그인 정보 입력 완료")
+
+                    # 로그인 버튼 찾기 전에 잠깐 대기 (사람이 마우스를 이동하는 시간)
+                    time.sleep(random.uniform(1.0, 2.0))
+
+                    # 로그인 버튼 찾기 (여러 패턴 시도)
+                    logger.info("🔍 로그인 버튼 찾는 중...")
+
+                    login_button_selectors = [
+                        (By.ID, "log.login"),
+                        (By.XPATH, "//button[contains(text(), '로그인')]"),
+                        (By.XPATH, "//input[@type='submit']"),
+                        (By.XPATH, "//button[@type='submit']"),
+                        (By.XPATH, "//*[contains(@class, 'btn_login')]"),
+                        (By.XPATH, "//a[contains(text(), '로그인')]"),
+                    ]
+
+                    login_btn_found = False
+                    for by_method, selector in login_button_selectors:
+                        try:
+                            login_btn = self.driver.find_element(by_method, selector)
+                            if login_btn.is_displayed():
+                                logger.info(f"✅ 로그인 버튼 발견: {selector}")
+                                login_btn.click()
+                                logger.info("✅ 로그인 버튼 클릭")
+                                # 로그인 처리 대기
+                                try:
+                                    WebDriverWait(self.driver, 5).until(
+                                        lambda d: 'nid.naver.com' not in d.current_url
+                                    )
+                                except:
+                                    time.sleep(2)  # 로그인 실패 시 최소 대기
+                                login_btn_found = True
+                                break
+                        except Exception as e:
+                            logger.debug(f"버튼 찾기 실패 ({selector}): {str(e)}")
+                            continue
+
+                    if not login_btn_found:
+                        logger.error("❌ 로그인 버튼을 찾을 수 없습니다")
+                        logger.info("페이지 HTML 일부:")
+                        try:
+                            page_html = self.driver.page_source
+                            # 로그인 관련 부분만 출력
+                            if '로그인' in page_html:
+                                idx = page_html.find('로그인')
+                                logger.info(page_html[max(0, idx-200):idx+200])
+                        except:
+                            pass
+                        return False, found_slot
+
+                    # 캡챠 체크
                     try:
-                        next_btn = self.driver.find_element(By.XPATH, selector)
-                        if next_btn.is_displayed() and next_btn.is_enabled():
-                            next_btn.click()
-                            logger.info("✅ '다음' 버튼 클릭")
-                            time.sleep(3)
-                            next_clicked = True
-                            break
-                    except:
-                        continue
-                
-                if not next_clicked:
-                    logger.warning("⚠️  '다음' 버튼을 찾지 못함")
-                
-                # "다음" 버튼 후 로그인 페이지 확인
-                time.sleep(2)
-                current_url = self.driver.current_url
-                
-                if 'nid.naver.com' in current_url or 'login' in current_url.lower():
-                    logger.info("=" * 60)
-                    logger.info("🔐 예약 페이지에서 로그인 요청됨")
-                    logger.info("=" * 60)
-                    
-                    # ID/PW 입력 폼 확인
-                    try:
-                        id_input = self.wait.until(
-                            EC.presence_of_element_located((By.ID, "id"))
-                        )
-                        pw_input = self.driver.find_element(By.ID, "pw")
-                        logger.info("✅ 로그인 폼 확인")
-                        
-                        # 사람처럼 천천히 입력
-                        logger.info("로그인 정보 입력 중...")
-                        id_input.clear()
-                        time.sleep(0.3)
-                        
-                        user_id = self.config['user_id']
-                        delay_per_char = 1.0 / len(user_id) if len(user_id) > 0 else 0.1
-                        for char in user_id:
-                            id_input.send_keys(char)
-                            time.sleep(delay_per_char)
-                        
-                        time.sleep(0.5)
-                        
-                        pw_input.clear()
-                        time.sleep(0.3)
-                        
-                        user_pw = self.config['user_pw']
-                        delay_per_char = 2.0 / len(user_pw) if len(user_pw) > 0 else 0.1
-                        for char in user_pw:
-                            pw_input.send_keys(char)
-                            time.sleep(delay_per_char)
-                        
-                        time.sleep(0.8)
-                        logger.info("✅ 로그인 정보 입력 완료 (ID: 1초, PW: 2초)")
-                        
-                        # 로그인 버튼 찾기 (여러 패턴 시도)
-                        logger.info("🔍 로그인 버튼 찾는 중...")
-                        
-                        login_button_selectors = [
-                            (By.ID, "log.login"),
-                            (By.XPATH, "//button[contains(text(), '로그인')]"),
-                            (By.XPATH, "//input[@type='submit']"),
-                            (By.XPATH, "//button[@type='submit']"),
-                            (By.XPATH, "//*[contains(@class, 'btn_login')]"),
-                            (By.XPATH, "//a[contains(text(), '로그인')]"),
-                        ]
-                        
-                        login_btn_found = False
-                        for by_method, selector in login_button_selectors:
+                        captcha = self.driver.find_element(By.ID, "captcha")
+                        logger.warning("⚠️  캡챠가 나타났습니다!")
+                        logger.warning("브라우저 창에서 캡챠를 입력해주세요 (최대 90초 대기)")
+
+                        for i in range(18):
+                            time.sleep(5)
                             try:
-                                login_btn = self.driver.find_element(by_method, selector)
-                                if login_btn.is_displayed():
-                                    logger.info(f"✅ 로그인 버튼 발견: {selector}")
-                                    login_btn.click()
-                                    logger.info("✅ 로그인 버튼 클릭")
-                                    time.sleep(5)
-                                    login_btn_found = True
+                                current_url = self.driver.current_url
+                                if 'nid.naver.com' not in current_url:
+                                    logger.info("✅ 캡챠 통과! 로그인 성공!")
                                     break
-                            except Exception as e:
-                                logger.debug(f"버튼 찾기 실패 ({selector}): {str(e)}")
-                                continue
-                        
-                        if not login_btn_found:
-                            logger.error("❌ 로그인 버튼을 찾을 수 없습니다")
-                            logger.info("페이지 HTML 일부:")
-                            try:
-                                page_html = self.driver.page_source
-                                # 로그인 관련 부분만 출력
-                                if '로그인' in page_html:
-                                    idx = page_html.find('로그인')
-                                    logger.info(page_html[max(0, idx-200):idx+200])
                             except:
                                 pass
-                            return False, found_slot
-                        
-                        # 캡챠 체크
-                        try:
-                            captcha = self.driver.find_element(By.ID, "captcha")
-                            logger.warning("⚠️  캡챠가 나타났습니다!")
-                            logger.warning("브라우저 창에서 캡챠를 입력해주세요 (최대 90초 대기)")
-                            
-                            for i in range(18):
-                                time.sleep(5)
-                                try:
-                                    current_url = self.driver.current_url
-                                    if 'nid.naver.com' not in current_url:
-                                        logger.info("✅ 캡챠 통과! 로그인 성공!")
-                                        break
-                                except:
-                                    pass
-                        except NoSuchElementException:
-                            # 캡챠 없음 - 로그인 성공
-                            logger.info("✅ 예약 페이지 로그인 성공!")
-                        
-                        # 로그인 후 원래 페이지로 자동 이동되는지 확인
-                        time.sleep(2)
-                        
-                    except Exception as e:
-                        logger.error(f"❌ 로그인 처리 실패: {str(e)}")
-                        import traceback
-                        logger.error(traceback.format_exc())
-                        return False, found_slot
-                    
-            except Exception as e:
-                logger.warning(f"⚠️  '다음' 버튼 처리 중 오류: {str(e)}")
-            
-            # "동의하고 예약하기" 버튼 클릭
-            try:
-                time.sleep(1)
-                logger.info("🔍 '동의하고 예약하기' 버튼 찾는 중...")
-                
-                agree_button_selectors = [
-                    "//button[@data-click-code='submitbutton.submit']",
-                    "//button[contains(@class, 'btn_request')]",
-                    "//button[contains(text(), '동의하고 예약하기')]",
-                ]
-                
-                agree_clicked = False
-                for selector in agree_button_selectors:
+                    except NoSuchElementException:
+                        # 캡챠 없음 - 로그인 성공
+                        logger.info("✅ 예약 페이지 로그인 성공!")
+
+                    # 로그인 후 원래 페이지로 자동 이동 대기
                     try:
-                        agree_btn = self.driver.find_element(By.XPATH, selector)
-                        if agree_btn.is_displayed() and agree_btn.is_enabled():
-                            agree_btn.click()
-                            logger.info("✅ '동의하고 예약하기' 버튼 클릭")
-                            time.sleep(3)  # 예약 처리 대기
-                            agree_clicked = True
-                            break
-                    except:
-                        continue
-                
-                if not agree_clicked:
-                    logger.error("❌ '동의하고 예약하기' 버튼을 찾지 못함")
-                    return False, found_slot
-                    
-            except Exception as e:
-                logger.error(f"❌ '동의하고 예약하기' 버튼 처리 실패: {str(e)}")
-                return False, found_slot
-            
-            # 예약 확정 확인
-            try:
-                time.sleep(2)
-                logger.info("🔍 예약 확정 여부 확인 중...")
-                
-                # "예약이 확정되었습니다" 텍스트 찾기
-                confirmation_selectors = [
-                    "//strong[contains(@class, 'popup_tit')][contains(text(), '예약이 확정')]",
-                    "//*[contains(text(), '예약이 확정되었습니다')]",
-                    "//strong[contains(text(), '예약이 확정')]",
-                ]
-                
-                confirmed = False
-                for selector in confirmation_selectors:
-                    try:
-                        confirm_elem = self.driver.find_element(By.XPATH, selector)
-                        if confirm_elem.is_displayed():
-                            confirm_text = confirm_elem.text
-                            logger.info(f"✅ 확인: '{confirm_text}'")
-                            confirmed = True
-                            break
-                    except:
-                        continue
-                
-                if not confirmed:
-                    # 페이지 전체에서 "확정" 텍스트 검색
-                    try:
-                        page_source = self.driver.page_source
-                        if '예약이 확정' in page_source or '확정되었습니다' in page_source:
-                            logger.info("✅ 페이지에서 '예약 확정' 메시지 발견")
-                            confirmed = True
+                        WebDriverWait(self.driver, 3).until(
+                            EC.presence_of_element_located((By.TAG_NAME, "body"))
+                        )
                     except:
                         pass
-                
-                if not confirmed:
-                    logger.error("❌ 예약 실패: '예약이 확정되었습니다' 메시지를 찾을 수 없음")
-                    logger.error("예약이 완료되지 않았거나 오류가 발생했을 수 있습니다")
+
+                except Exception as e:
+                    logger.error(f"❌ 로그인 처리 실패: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
                     return False, found_slot
-                
-            except Exception as e:
-                logger.error(f"❌ 예약 확정 확인 실패: {str(e)}")
+
+            # "동의하고 예약하기" 버튼 클릭 (공통 함수 사용)
+            if not self._click_agree_and_book():
                 return False, found_slot
             
-            # 결과
-            logger.info("\n" + "=" * 60)
-            logger.info("🎉 예약 완료!")
-            logger.info("=" * 60)
-            logger.info(f"📍 타석: {found_slot['booth_text']}")
-            logger.info(f"📅 날짜: {found_slot['date']} ({found_slot['day_name']})")
-            logger.info(f"⏰ 시간: {found_slot['time']}")
-            logger.info("=" * 60)
-            
+            # 예약 확정 확인 (공통 함수 사용)
+            if not self._confirm_booking():
+                return False, found_slot
+
+            # 예약 완료 처리 (공통 함수 사용)
+            self._complete_booking(found_slot)
+
             time.sleep(5)
             return True, found_slot
             
@@ -1322,9 +1552,11 @@ class GolfBookingBot:
                         
                         target_date = today + timedelta(days=day_offset)
                         target_day = target_date.day
-                        day_name = ["오늘", "내일", "모레"][day_offset]
-                        
-                        logger.info(f"\n  📅 {day_name} ({target_date.strftime('%Y-%m-%d')})")
+                        day_label = ["오늘", "내일", "모레"][day_offset]
+                        weekday_name = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일'][target_date.weekday()]
+                        day_name = f"{weekday_name}, {day_label}"
+
+                        logger.info(f"\n  📅 {day_label} ({target_date.strftime('%Y-%m-%d')} {weekday_name})")
                         
                         # 날짜 선택
                         if day_offset > 0:
@@ -1457,7 +1689,15 @@ class GolfBookingBot:
             logger.info(f"📅 날짜: {found_slot['date']} ({found_slot['day_name']})")
             logger.info(f"⏰ 시간: {found_slot['time']}")
             logger.info("=" * 60)
-            
+
+            # 카카오톡 알림 전송
+            self.send_booking_notification(
+                booth_text=found_slot['booth_text'],
+                date=found_slot['date'],
+                day_name=found_slot['day_name'],
+                time_slot=found_slot['time']
+            )
+
             time.sleep(5)
             return True, found_slot
             
@@ -1477,9 +1717,11 @@ class GolfBookingBot:
             for day_offset in range(3):
                 target_date = today + timedelta(days=day_offset)
                 target_day = target_date.day
-                day_name = ["오늘", "내일", "모레"][day_offset]
-                
-                logger.info(f"\n📅 {day_name} ({target_date.strftime('%Y-%m-%d')})")
+                day_label = ["오늘", "내일", "모레"][day_offset]
+                weekday_name = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일'][target_date.weekday()]
+                day_name = f"{weekday_name}, {day_label}"
+
+                logger.info(f"\n📅 {day_label} ({target_date.strftime('%Y-%m-%d')} {weekday_name})")
                 
                 if day_offset > 0:
                     try:
@@ -1595,9 +1837,11 @@ class GolfBookingBot:
                     
                     target_date = today + timedelta(days=day_offset)
                     target_day = target_date.day
-                    day_name = ["오늘", "내일", "모레"][day_offset]
-                    
-                    logger.info(f"\n  📅 {day_name} ({target_date.strftime('%Y-%m-%d')}) 확인")
+                    day_label = ["오늘", "내일", "모레"][day_offset]
+                    weekday_name = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일'][target_date.weekday()]
+                    day_name = f"{weekday_name}, {day_label}"
+
+                    logger.info(f"\n  📅 {day_label} ({target_date.strftime('%Y-%m-%d')} {weekday_name}) 확인")
                     
                     # 날짜 선택 (오늘이 아닌 경우)
                     if day_offset > 0:
@@ -1866,9 +2110,11 @@ class GolfBookingBot:
                 
                 target_date = today + timedelta(days=day_offset)
                 target_day = target_date.day
-                day_name = ["오늘", "내일", "모레"][day_offset]
-                
-                logger.info(f"\n━━━ {day_name} ({target_date.strftime('%Y-%m-%d')}) 확인 ━━━")
+                day_label = ["오늘", "내일", "모레"][day_offset]
+                weekday_name = ['월요일', '화요일', '수요일', '목요일', '금요일', '토요일', '일요일'][target_date.weekday()]
+                day_name = f"{weekday_name}, {day_label}"
+
+                logger.info(f"\n━━━ {day_label} ({target_date.strftime('%Y-%m-%d')} {weekday_name}) 확인 ━━━")
                 
                 # 날짜 선택 (오늘이 아닌 경우만)
                 if day_offset > 0:
@@ -2623,79 +2869,15 @@ class GolfBookingBot:
                     logger.error(traceback.format_exc())
                     return False
             
-            # "동의하고 예약하기" 버튼
-            try:
-                time.sleep(1)
-                logger.info("🔍 '동의하고 예약하기' 버튼 찾는 중...")
-                
-                agree_button_selectors = [
-                    "//button[@data-click-code='submitbutton.submit']",
-                    "//button[contains(@class, 'btn_request')]",
-                    "//button[contains(text(), '동의하고 예약하기')]",
-                ]
-                
-                agree_clicked = False
-                for selector in agree_button_selectors:
-                    try:
-                        agree_btn = self.driver.find_element(By.XPATH, selector)
-                        if agree_btn.is_displayed() and agree_btn.is_enabled():
-                            agree_btn.click()
-                            logger.info("✅ '동의하고 예약하기' 버튼 클릭")
-                            time.sleep(3)
-                            agree_clicked = True
-                            break
-                    except:
-                        continue
-                
-                if not agree_clicked:
-                    logger.error("❌ '동의하고 예약하기' 버튼을 찾지 못함")
-                    return False
-                    
-            except Exception as e:
-                logger.error(f"❌ '동의하고 예약하기' 버튼 처리 실패: {str(e)}")
+            # "동의하고 예약하기" 버튼 (공통 함수 사용)
+            if not self._click_agree_and_book():
                 return False
-            
-            # 예약 확정 확인
-            try:
-                time.sleep(2)
-                logger.info("🔍 예약 확정 여부 확인 중...")
-                
-                confirmation_selectors = [
-                    "//strong[contains(@class, 'popup_tit')][contains(text(), '예약이 확정')]",
-                    "//*[contains(text(), '예약이 확정되었습니다')]",
-                    "//strong[contains(text(), '예약이 확정')]",
-                ]
-                
-                confirmed = False
-                for selector in confirmation_selectors:
-                    try:
-                        confirm_elem = self.driver.find_element(By.XPATH, selector)
-                        if confirm_elem.is_displayed():
-                            confirm_text = confirm_elem.text
-                            logger.info(f"✅ 확인: '{confirm_text}'")
-                            confirmed = True
-                            break
-                    except:
-                        continue
-                
-                if not confirmed:
-                    try:
-                        page_source = self.driver.page_source
-                        if '예약이 확정' in page_source or '확정되었습니다' in page_source:
-                            logger.info("✅ 페이지에서 '예약 확정' 메시지 발견")
-                            confirmed = True
-                    except:
-                        pass
-                
-                if not confirmed:
-                    logger.error("❌ 예약 실패: '예약이 확정되었습니다' 메시지를 찾을 수 없음")
-                    return False
-                
-                return True
-                
-            except Exception as e:
-                logger.error(f"❌ 예약 확정 확인 실패: {str(e)}")
+
+            # 예약 확정 확인 (공통 함수 사용)
+            if not self._confirm_booking():
                 return False
+
+            return True
                 
         except Exception as e:
             logger.error(f"❌ 예약 단계 처리 실패: {str(e)}")
